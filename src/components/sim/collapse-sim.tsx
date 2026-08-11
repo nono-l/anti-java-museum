@@ -1,15 +1,27 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { recordMuseumEvent } from "@/lib/museum-stats";
 import {
   encodeGameResult,
   type SharedGameResult,
 } from "@/lib/game-result";
 import { GameResultView } from "@/components/sim/game-result-view";
+import { useCurrentUserState } from "@/lib/auth/use-current-user";
+import {
+  clearSimSave,
+  getSimSave,
+  saveSimSave,
+  type SimSavePayload,
+} from "@/lib/sim-save";
 
 /**
- * カイロソフト風: 1日の中で行動力を使い切るまでコマンド選択、
- * 「ねる」で日付進行。エンディングは暗号っぽい /Game/... でシェア可。
+ * カイロソフト風: 1日の中で行動力を使い切るまでコマンド選択。
+ * ねる = AP4 で意図的な休息。AP0 で翌日へ = 気絶（悪化）。
+ * 1日の行動力メモリは 10。
  */
+
+const AP_MAX = 10;
+const SLEEP_AP = 4;
 
 type Stats = {
   body: number;
@@ -24,13 +36,25 @@ type Stats = {
   ap: number;
 };
 
+type Gamble = {
+  rate: number;
+  win: Partial<Stats>;
+  lose: Partial<Stats>;
+  winText: string;
+  loseText: string;
+  moneyWin?: number;
+  moneyLose?: number;
+};
+
 type Action = {
   id: string;
   name: string;
-  cat: "仕事" | "育成" | "処理" | "休息";
+  cat: "仕事" | "育成" | "処理" | "休息" | "博打";
   ap: number;
   desc: string;
   effect: Partial<Stats>;
+  /** ハイリスクハイリターン（成功/失敗で分岐） */
+  gamble?: Gamble;
 };
 
 type Project = {
@@ -162,11 +186,129 @@ const ACTIONS: Action[] = [
     effect: { stress: -8, body: 8, mind: 4 },
   },
   {
+    id: "allnighter",
+    name: "徹夜強行",
+    cat: "博打",
+    ap: 3,
+    desc: "成功で進捗爆上げ / 失敗で心身崩壊",
+    effect: { body: -8, mind: -4 },
+    gamble: {
+      rate: 0.45,
+      win: { progress: 22, tech: 4, stress: 8, body: -6 },
+      lose: { progress: 4, stress: 18, mind: -16, body: -14, debt: 6 },
+      winText: "夜明け前に動いた。進捗が跳ねた。",
+      loseText: "朝までにバグが増えた。自分がバグった。",
+      moneyWin: 8,
+    },
+  },
+  {
+    id: "prod_patch",
+    name: "本番直パッチ",
+    cat: "博打",
+    ap: 2,
+    desc: "炎上を止めるか、炎上を生むか",
+    effect: { stress: 6, mind: -3 },
+    gamble: {
+      rate: 0.4,
+      win: { progress: 14, trust: 12, debt: 8 },
+      lose: { progress: -6, trust: -14, stress: 16, mind: -10, debt: 12 },
+      winText: "奇跡のホットフィックス。クライアントが拍手。",
+      loseText: "パッチが別の NPE を生んだ。電話が鳴り止まない。",
+      moneyWin: 12,
+      moneyLose: -5,
+    },
+  },
+  {
+    id: "big_refactor",
+    name: "全捨てリファクタ",
+    cat: "博打",
+    ap: 4,
+    desc: "負債を溶かすか、納期を溶かすか",
+    effect: { body: -6, stress: 4 },
+    gamble: {
+      rate: 0.35,
+      win: { debt: -28, tech: 8, progress: 8, learn: 4 },
+      lose: { debt: 14, progress: -12, stress: 14, mind: -8, trust: -6 },
+      winText: "層が薄くなった。息ができる。",
+      loseText: "コンパイルが通らない世界線に落ちた。",
+    },
+  },
+  {
+    id: "secret_lang",
+    name: "こっそり他言語",
+    cat: "博打",
+    ap: 2,
+    desc: "学びを得るか、発覚して詰むか",
+    effect: { mono: -2 },
+    gamble: {
+      rate: 0.5,
+      win: { learn: 16, mono: -10, tech: 3, mind: 4 },
+      lose: { trust: -12, mono: 6, stress: 12, mind: -6, learn: 4 },
+      winText: "誰にもバレず、世界が少し広がった。",
+      loseText: "『うちは Java だけ』の会議室に召喚された。",
+    },
+  },
+  {
+    id: "log_nuke",
+    name: "ログ全消し勝負",
+    cat: "博打",
+    ap: 1,
+    desc: "握りつぶしの極致。運が良ければ平穏",
+    effect: { mind: -4 },
+    gamble: {
+      rate: 0.42,
+      win: { stress: -18, trust: 6, progress: 4, debt: 8 },
+      lose: { stress: 20, mind: -14, trust: -10, debt: 14, progress: -4 },
+      winText: "ログも証拠も消えた。しばらく静かだ。",
+      loseText: "監査が来た。消した痕跡が残っていた。",
+    },
+  },
+  {
+    id: "dep_bump",
+    name: "依存全部上げ",
+    cat: "博打",
+    ap: 2,
+    desc: "最新の恩恵か、地獄のコンパイルか",
+    effect: { stress: 4 },
+    gamble: {
+      rate: 0.38,
+      win: { tech: 12, progress: 10, debt: -4 },
+      lose: { debt: 18, progress: -8, stress: 14, mind: -8, body: -4 },
+      winText: "ビルドが通った。新しい API が輝く。",
+      loseText: "javax と jakarta が同時に現れた。",
+    },
+  },
+  {
+    id: "flame_demo",
+    name: "炎上デモ",
+    cat: "博打",
+    ap: 3,
+    desc: "一発逆転プレゼン / 一発退場",
+    effect: { stress: 8, body: -4 },
+    gamble: {
+      rate: 0.33,
+      win: { trust: 18, progress: 16 },
+      lose: { trust: -16, progress: -4, stress: 18, mind: -12 },
+      winText: "『これで行きましょう』— 予算が動いた。",
+      loseText: "画面共有のまま NPE が流れた。",
+      moneyWin: 20,
+      moneyLose: -8,
+    },
+  },
+  {
     id: "sleep",
     name: "ねる",
     cat: "休息",
+    ap: SLEEP_AP,
+    desc: "ちゃんと寝る。日付進行＆回復",
+    effect: {},
+  },
+  {
+    id: "faint",
+    name: "気絶",
+    cat: "休息",
     ap: 0,
-    desc: "日付を進めて回復",
+    desc: "AP0 で倒れる。翌日はAPだけ満タン（体力は回復しない）",
     effect: {},
   },
 ];
@@ -174,10 +316,35 @@ const ACTIONS: Action[] = [
 const MORNING: { w: number; text: string; effect: Partial<Stats> }[] = [
   { w: 3, text: "平和な朝。IDE が重い。", effect: {} },
   { w: 2, text: "本番 NPE の連絡。", effect: { stress: 8, mind: -4, trust: -3 } },
-  { w: 1, text: "jakarta 混在エラー。", effect: { stress: 10, debt: 5 } },
-  { w: 1, text: "『Java だけでいい』定例。", effect: { mono: 4, learn: -2 } },
-  { w: 1, text: "検収を急かされた。", effect: { stress: 6, trust: 2 } },
-  { w: 1, text: "CVE アラート。", effect: { stress: 5, body: -2 } },
+  { w: 2, text: "jakarta 混在エラー。", effect: { stress: 10, debt: 5 } },
+  { w: 2, text: "『Java だけでいい』定例。", effect: { mono: 4, learn: -2 } },
+  { w: 2, text: "検収を急かされた。", effect: { stress: 6, trust: 2 } },
+  { w: 2, text: "CVE アラート。", effect: { stress: 5, body: -2 } },
+  { w: 1, text: "Slack が真っ赤。障害チャンネルが爆速。", effect: { stress: 12, mind: -5, progress: -2 } },
+  { w: 1, text: "仕様書が消えていた。誰かが『最新は私の頭』。", effect: { debt: 6, stress: 6 } },
+  { w: 1, text: "先輩が『フレームワーク信仰やめろ』と囁いた。", effect: { learn: 5, mono: -3, mind: 3 } },
+  { w: 1, text: "コーヒーメーカー故障。社会が終わった。", effect: { stress: 8, body: -3, mind: -2 } },
+  { w: 1, text: "意外とテストが全部緑。不気味。", effect: { progress: 4, mind: 4, stress: -4 } },
+  { w: 1, text: "Oracle ライセンスの話が出た。空気が重い。", effect: { stress: 7, mono: 2 } },
+];
+
+/** 行動後にランダムで刺さる日中イベント */
+const MIDDAY: { w: number; text: string; effect: Partial<Stats>; money?: number }[] = [
+  { w: 3, text: "特に何も起きなかった…はず。", effect: {} },
+  { w: 2, text: "突然の仕様変更メール。", effect: { progress: -5, stress: 8, debt: 4 } },
+  { w: 2, text: "レビューコメントが 40 件飛んできた。", effect: { stress: 7, body: -3, debt: 3 } },
+  { w: 2, text: "本番でタイムアウト増加。", effect: { stress: 9, trust: -4, mind: -3 } },
+  { w: 1, text: "クライアントが『素晴らしい』と一言。", effect: { trust: 8, mind: 5, stress: -4 }, money: 5 },
+  { w: 1, text: "CI が落ちた。原因はフラキーテスト。", effect: { progress: -3, stress: 5 } },
+  { w: 1, text: "新人に『なぜ Java？』と聞かれて黙った。", effect: { mono: -2, learn: 3, mind: -2 } },
+  { w: 1, text: "Log4j の話題がチームで再燃。", effect: { stress: 6, debt: 2 } },
+  { w: 1, text: "気づいたら AbstractFactory が増えていた。", effect: { debt: 7, mono: 3, progress: 2 } },
+  { w: 1, text: "監視が静か。今日だけは味方だ。", effect: { stress: -8, mind: 4 } },
+  { w: 1, text: "会議室が取れず立ち話で決裁。カオス。", effect: { trust: 3, stress: 5, progress: 3 } },
+  { w: 1, text: "依存の transitive が衝突。半日溶ける予感。", effect: { debt: 5, stress: 6, body: -2 } },
+  { w: 1, text: "偶然 Stack Overflow の正解を引いた。", effect: { progress: 6, tech: 3, mind: 3 } },
+  { w: 1, text: "『来週デモ』を今知った。", effect: { stress: 12, mind: -6, progress: 2 } },
+  { w: 1, text: "電源が落ちた。保存してなくて泣いた。", effect: { progress: -4, mind: -8, stress: 8 } },
 ];
 
 const START: Stats = {
@@ -190,7 +357,7 @@ const START: Stats = {
   learn: 12,
   progress: 0,
   debt: 25,
-  ap: 5,
+  ap: AP_MAX,
 };
 
 function clamp(n: number, lo = 0, hi = 100) {
@@ -202,20 +369,50 @@ function apply(s: Stats, d: Partial<Stats>): Stats {
   (Object.keys(d) as (keyof Stats)[]).forEach((k) => {
     const v = d[k];
     if (v == null) return;
-    if (k === "ap") n.ap = clamp(s.ap + v, 0, 8);
+    if (k === "ap") n.ap = clamp(s.ap + v, 0, AP_MAX);
     else n[k] = clamp(s[k] + v);
   });
   return n;
 }
 
-function pickMorning() {
-  const t = MORNING.reduce((a, b) => a + b.w, 0);
-  let r = Math.random() * t;
-  for (const m of MORNING) {
-    r -= m.w;
-    if (r <= 0) return m;
+function pickWeighted<T extends { w: number }>(list: T[]): T {
+  const total = list.reduce((a, b) => a + b.w, 0);
+  let r = Math.random() * total;
+  for (const item of list) {
+    r -= item.w;
+    if (r <= 0) return item;
   }
-  return MORNING[0]!;
+  return list[0]!;
+}
+
+function pickMorning() {
+  return pickWeighted(MORNING);
+}
+
+function pickMidday() {
+  return pickWeighted(MIDDAY);
+}
+
+function fmtDelta(d: Partial<Stats>): string {
+  const labels: Record<string, string> = {
+    body: "体力",
+    mind: "精神",
+    stress: "ストレス",
+    tech: "技術",
+    trust: "信用",
+    mono: "信仰",
+    learn: "学び",
+    progress: "進捗",
+    debt: "負債",
+    ap: "AP",
+  };
+  return (Object.keys(d) as (keyof Stats)[])
+    .filter((k) => d[k] != null && d[k] !== 0 && k !== "ap")
+    .map((k) => {
+      const v = d[k] as number;
+      return `${labels[k] ?? k}${v > 0 ? "+" : ""}${v}`;
+    })
+    .join(" ");
 }
 
 function face(s: Stats): { key: string; label: string } {
@@ -297,6 +494,7 @@ function grade(
 }
 
 export function CollapseSim() {
+  const { user, isPending } = useCurrentUserState();
   const [phase, setPhase] = useState<Phase>("title");
   const [project, setProject] = useState<Project | null>(null);
   const [stats, setStats] = useState<Stats>(START);
@@ -307,6 +505,187 @@ export function CollapseSim() {
   const [morning, setMorning] = useState("");
   const [ending, setEnding] = useState<Ending | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
+  const [cloudStatus, setCloudStatus] = useState<
+    "idle" | "loading" | "saved" | "saving" | "error" | "guest"
+  >("idle");
+  const [cloudHint, setCloudHint] = useState("");
+  const hydratedRef = useRef(false);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skipNextSave = useRef(false);
+
+  function buildPayload(): SimSavePayload {
+    return {
+      v: 1,
+      phase,
+      projectId: project?.id ?? null,
+      stats: { ...stats },
+      day,
+      money,
+      log: log.slice(0, 24),
+      morning,
+      toast,
+      ending: ending
+        ? {
+            rank: ending.rank,
+            title: ending.title,
+            body: ending.body,
+            scores: ending.scores,
+            shared: ending.shared,
+            code: ending.code,
+          }
+        : null,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  function applyPayload(payload: SimSavePayload, source: "cloud" | "local") {
+    skipNextSave.current = true;
+    const p = payload.projectId
+      ? PROJECTS.find((x) => x.id === payload.projectId) ?? null
+      : null;
+    setProject(p);
+    setStats({ ...START, ...payload.stats, ap: Math.min(AP_MAX, Math.max(0, payload.stats.ap)) });
+    setDay(payload.day);
+    setMoney(payload.money);
+    setLog(payload.log);
+    setMorning(payload.morning);
+    setToast(payload.toast || (source === "cloud" ? "クラウドから復元" : "端末から復元"));
+    if (payload.ending && payload.phase === "end") {
+      setEnding({
+        rank: payload.ending.rank,
+        title: payload.ending.title,
+        body: payload.ending.body,
+        scores: payload.ending.scores,
+        shared: payload.ending.shared as SharedGameResult,
+        code: payload.ending.code,
+      });
+    } else {
+      setEnding(null);
+    }
+    // 案件なしの play は title へ
+    if (payload.phase === "play" && !p) {
+      setPhase("pick");
+    } else {
+      setPhase(payload.phase);
+    }
+    setCloudHint(
+      source === "cloud"
+        ? `ID連携セーブを復元（${new Date(payload.updatedAt).toLocaleString("ja-JP")}）`
+        : "この端末の一時セーブを復元",
+    );
+  }
+
+  // 初回: ログイン済みなら DB、なければ localStorage
+  useEffect(() => {
+    if (isPending || hydratedRef.current) return;
+    hydratedRef.current = true;
+
+    let cancelled = false;
+    (async () => {
+      if (!user) {
+        setCloudStatus("guest");
+        try {
+          const raw = localStorage.getItem("jaba-sim-save-v1");
+          if (raw) {
+            const parsed = JSON.parse(raw) as SimSavePayload;
+            if (parsed?.v === 1 && (parsed.phase === "play" || parsed.phase === "end")) {
+              applyPayload(parsed, "local");
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+
+      setCloudStatus("loading");
+      try {
+        const rec = await getSimSave();
+        if (cancelled) return;
+        if (rec?.payload && (rec.payload.phase === "play" || rec.payload.phase === "end" || rec.payload.phase === "pick")) {
+          applyPayload(rec.payload, "cloud");
+          setCloudStatus("saved");
+        } else {
+          // クラウド空 → 端末にあればアップロード候補として読む
+          try {
+            const raw = localStorage.getItem("jaba-sim-save-v1");
+            if (raw) {
+              const parsed = JSON.parse(raw) as SimSavePayload;
+              if (parsed?.v === 1 && (parsed.phase === "play" || parsed.phase === "end")) {
+                applyPayload(parsed, "local");
+                setCloudHint("端末セーブを表示中。操作するとクラウドへ同期します");
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+          setCloudStatus("saved");
+          setCloudHint((h) => h || "クラウドセーブ枠を確保済み（進行が自動保存されます）");
+        }
+      } catch {
+        if (!cancelled) {
+          setCloudStatus("error");
+          setCloudHint("クラウド読込に失敗。端末セーブのみ有効");
+          try {
+            const raw = localStorage.getItem("jaba-sim-save-v1");
+            if (raw) {
+              const parsed = JSON.parse(raw) as SimSavePayload;
+              if (parsed?.v === 1) applyPayload(parsed, "local");
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount / user resolve once
+  }, [user, isPending]);
+
+  // オートセーブ（操作のたび debounce）
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    if (skipNextSave.current) {
+      skipNextSave.current = false;
+      return;
+    }
+    // title のみは保存しない（新規待ち）
+    if (phase === "title") return;
+
+    const payload = buildPayload();
+    try {
+      localStorage.setItem("jaba-sim-save-v1", JSON.stringify(payload));
+    } catch {
+      /* ignore */
+    }
+
+    if (!user) {
+      setCloudStatus("guest");
+      return;
+    }
+
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      setCloudStatus("saving");
+      void saveSimSave({ data: { payload } })
+        .then(() => {
+          setCloudStatus("saved");
+          setCloudHint(`クラウド同期 ${new Date().toLocaleTimeString("ja-JP")}`);
+        })
+        .catch(() => {
+          setCloudStatus("error");
+          setCloudHint("クラウド保存に失敗（端末には残っています）");
+        });
+    }, 650);
+
+    return () => {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, project, stats, day, money, log, morning, ending, user]);
 
   const f = face(stats);
   const threat = useMemo(
@@ -343,7 +722,19 @@ export function CollapseSim() {
     if (!project) return;
 
     if (a.id === "sleep") {
-      sleep();
+      if (stats.ap < SLEEP_AP) {
+        setToast(`寝るには行動力 ${SLEEP_AP} が必要！`);
+        return;
+      }
+      advanceDay("sleep");
+      return;
+    }
+    if (a.id === "faint") {
+      if (stats.ap !== 0) {
+        setToast("まだ動ける。気絶は AP0 のときだけ。");
+        return;
+      }
+      advanceDay("faint");
       return;
     }
     if (stats.ap < a.ap) {
@@ -352,20 +743,58 @@ export function CollapseSim() {
     }
 
     let next = apply(stats, { ...a.effect, ap: -a.ap });
-    if (next.body < 30) next = apply(next, { mind: -3, stress: 3 });
-    if (next.debt > 70 && (a.id === "impl" || a.id === "demo")) {
-      next = apply(next, { progress: -2 });
+    let toastMsg = `${a.name} を実行！`;
+    let logLine = `${day}日 ${a.name}: ${a.desc}`;
+    let nextMoney = money;
+
+    // ハイリスクコマンド: 成功/失敗ロール
+    if (a.gamble) {
+      const ok = Math.random() < a.gamble.rate;
+      const branch = ok ? a.gamble.win : a.gamble.lose;
+      next = apply(next, branch);
+      const delta = fmtDelta(branch);
+      toastMsg = ok
+        ? `成功！ ${a.gamble.winText}`
+        : `失敗… ${a.gamble.loseText}`;
+      logLine = `${day}日 【博打】${a.name} → ${ok ? "成功" : "失敗"} ${delta ? `(${delta})` : ""} — ${ok ? a.gamble.winText : a.gamble.loseText}`;
+      const mDelta = ok ? (a.gamble.moneyWin ?? 0) : (a.gamble.moneyLose ?? 0);
+      if (mDelta) nextMoney = Math.max(0, nextMoney + mDelta);
+    } else {
+      if (next.body < 30) next = apply(next, { mind: -3, stress: 3 });
+      if (next.debt > 70 && (a.id === "impl" || a.id === "demo")) {
+        next = apply(next, { progress: -2 });
+      }
+      const gain =
+        a.id === "demo" || a.id === "impl" ? 3 + Math.floor(next.progress / 25) : 0;
+      if (gain) nextMoney = nextMoney + gain;
     }
 
-    const gain = a.id === "demo" || a.id === "impl" ? 3 + Math.floor(next.progress / 25) : 0;
-    const nextMoney = money + gain;
-    if (gain) setMoney(nextMoney);
+    // 日中ランダムイベント（高めの頻度）
+    const eventChance = a.gamble ? 0.55 : 0.42;
+    if (Math.random() < eventChance) {
+      const ev = pickMidday();
+      if (Object.keys(ev.effect).length > 0 || (ev.money && ev.money !== 0)) {
+        next = apply(next, ev.effect);
+        if (ev.money) nextMoney = Math.max(0, nextMoney + ev.money);
+        const ed = fmtDelta(ev.effect);
+        logLine += ` / 事件: ${ev.text}${ed ? ` (${ed})` : ""}`;
+        toastMsg += ` ／ ${ev.text}`;
+      } else if (Math.random() < 0.35) {
+        // 平和イベントもたまにログ
+        logLine += ` / ${ev.text}`;
+      }
+    }
+
+    if (nextMoney !== money) setMoney(nextMoney);
 
     setStats(next);
-    setFlash(a.name);
-    setToast(`${a.name} を実行！`);
-    pushLog(`${day}日 ${a.name}: ${a.desc}`);
-    void recordMuseumEvent("joy");
+    setFlash(a.gamble ? `博打:${a.name}` : a.name);
+    if (next.ap === 0) {
+      toastMsg += " AP0 — 気絶して翌日へ、か。";
+    }
+    setToast(toastMsg);
+    pushLog(logLine);
+    void recordMuseumEvent(a.gamble ? "interaction" : "joy");
 
     const end = endingOf(next, project, day, nextMoney);
     if (end) {
@@ -373,28 +802,59 @@ export function CollapseSim() {
       setPhase("end");
       void recordMuseumEvent("share");
     }
-    window.setTimeout(() => setFlash(null), 400);
+    window.setTimeout(() => setFlash(null), 500);
   }
 
-  function sleep() {
+  function advanceDay(mode: "sleep" | "faint") {
     if (!project) return;
     const nextDay = day + 1;
-    let s = apply(stats, {
-      body: 18,
-      mind: 8,
-      stress: -12,
-    });
-    s = { ...s, ap: 5 };
+
+    let s =
+      mode === "sleep"
+        ? apply(stats, {
+            ap: -SLEEP_AP,
+            body: 18,
+            mind: 10,
+            stress: -14,
+          })
+        : apply(stats, {
+            body: -6,
+            stress: 18,
+            mind: -14,
+          });
+
+    s = { ...s, ap: AP_MAX };
 
     const m = pickMorning();
     s = apply(s, m.effect);
+    let morningText = m.text;
+    // 朝にもう一件刺さることがある
+    if (Math.random() < 0.4) {
+      const extra = pickMidday();
+      if (Object.keys(extra.effect).length > 0) {
+        s = apply(s, extra.effect);
+        morningText = `${m.text} ＋ ${extra.text}`;
+      }
+    }
     if (s.debt > 55) s = apply(s, { progress: -1, stress: 2 });
+    if (mode === "faint") {
+      s = apply(s, { stress: 4, mind: -3 });
+    }
 
     setStats(s);
     setDay(nextDay);
-    setMorning(m.text);
-    pushLog(`${nextDay}日目 — ねた。朝: ${m.text}`);
-    setToast(`${nextDay}日目 はじまり！`);
+    setMorning(morningText);
+    if (mode === "sleep") {
+      pushLog(`${nextDay}日目 — ちゃんと寝た。朝: ${m.text}`);
+      setToast(`${nextDay}日目 はじまり！（回復）`);
+      setFlash("ねる");
+    } else {
+      pushLog(
+        `${nextDay}日目 — 気絶して翌朝。行動力だけ満タン。体力は削れ、精神↓・ストレス↑。朝: ${m.text}`,
+      );
+      setToast(`${nextDay}日目…気絶明け。キツい。`);
+      setFlash("気絶");
+    }
     void recordMuseumEvent("interaction");
 
     const end = endingOf(s, project, nextDay, money);
@@ -402,6 +862,7 @@ export function CollapseSim() {
       setEnding(end);
       setPhase("end");
     }
+    window.setTimeout(() => setFlash(null), 500);
   }
 
   function reset() {
@@ -414,10 +875,39 @@ export function CollapseSim() {
     setToast("");
     setMorning("");
     setEnding(null);
+    setCloudHint("");
+    try {
+      localStorage.removeItem("jaba-sim-save-v1");
+    } catch {
+      /* ignore */
+    }
+    if (user) {
+      void clearSimSave()
+        .then(() => {
+          setCloudStatus("saved");
+          setCloudHint("クラウドセーブを削除しました");
+        })
+        .catch(() => {
+          setCloudStatus("error");
+        });
+    }
+  }
+
+  function isDisabled(a: Action): boolean {
+    if (a.id === "sleep") return stats.ap < SLEEP_AP;
+    if (a.id === "faint") return stats.ap !== 0;
+    return stats.ap < a.ap;
+  }
+
+  function apLabel(a: Action): string {
+    if (a.id === "sleep") return `AP${SLEEP_AP}`;
+    if (a.id === "faint") return "AP0限定";
+    return a.ap ? `AP${a.ap}` : "—";
   }
 
   const byCat = {
     仕事: ACTIONS.filter((a) => a.cat === "仕事"),
+    博打: ACTIONS.filter((a) => a.cat === "博打"),
     育成: ACTIONS.filter((a) => a.cat === "育成"),
     処理: ACTIONS.filter((a) => a.cat === "処理"),
     休息: ACTIONS.filter((a) => a.cat === "休息"),
@@ -427,19 +917,60 @@ export function CollapseSim() {
     <div className="kairo mx-auto max-w-lg">
       <style>{kairoCss}</style>
 
+      <div className="kairo-cloud" role="status">
+        {isPending ? (
+          <span>セーブ枠を確認中…</span>
+        ) : user ? (
+          <span>
+            ID連携中（{user.displayName || user.primaryEmail || "来館者"}）
+            {" · "}
+            {cloudStatus === "saving"
+              ? "保存中…"
+              : cloudStatus === "loading"
+                ? "読込中…"
+                : cloudStatus === "error"
+                  ? "同期エラー"
+                  : "クラウド自動保存 ON"}
+          </span>
+        ) : (
+          <span>
+            ゲストプレイ中（端末のみ） ·{" "}
+            <Link to="/login" search={{ redirect: "/sim" }} className="kairo-cloud-link">
+              ログインして引き継ぎ
+            </Link>
+          </span>
+        )}
+        {cloudHint ? <span className="kairo-cloud-hint">{cloudHint}</span> : null}
+      </div>
+
       {phase === "title" && (
         <div className="kairo-panel">
           <div className="kairo-title">
             <p className="kairo-tag">KAIRO-LIKE SIM</p>
             <h1>ジャバだけ社畜物語</h1>
             <p className="kairo-sub">
-              カイロソフト風の一日管理シミュ。エンディングは暗号っぽいリンクで
-              X シェアでき、結果ページと個別カードが表示されます。
+              カイロソフト風の一日管理シミュ。1日の行動力は {AP_MAX}。
+              ちゃんと寝るには行動力がいる。使い切って倒れるのは気絶——
+              翌日は行動力だけ戻り、体力も心も削れる。
             </p>
           </div>
           <ul className="kairo-help">
-            <li>昼: 行動力の限りコマンドを連打</li>
-            <li>「ねる」で日付進行＆回復</li>
+            <li>
+              昼: 行動力 <strong>{AP_MAX}</strong> のメモリを使い切るまで行動
+            </li>
+            <li>
+              <strong>ねる = AP{SLEEP_AP}</strong>（意図的休息・回復）
+            </li>
+            <li>
+              <strong>AP0 で翌日 = 気絶</strong>（APだけ回復・体力↓・ストレス↑・精神↓）
+            </li>
+            <li>
+              <strong>博打コマンド</strong>は成功率つき。一発逆転も一発退場も
+            </li>
+            <li>行動後・朝にランダム事件がよく刺さる</li>
+            <li>
+              <strong>ログイン</strong>すると進行が DB に自動保存され、端末をまたいで再開できる
+            </li>
             <li>エンディング後に /Game/… で結果シェア</li>
           </ul>
           <button
@@ -492,6 +1023,16 @@ export function CollapseSim() {
               <p className="kairo-morning">{morning}</p>
               {toast && <p className="kairo-toast">{toast}</p>}
               {flash && <p className="kairo-flash">▶ {flash}</p>}
+              {stats.ap === 0 && (
+                <p className="kairo-toast" style={{ marginTop: 8 }}>
+                  AP が尽きた。気絶して翌日へ進むしかない。
+                </p>
+              )}
+              {stats.ap > 0 && stats.ap < SLEEP_AP && (
+                <p className="kairo-toast" style={{ marginTop: 8, color: "var(--k-muted)" }}>
+                  ねるには AP{SLEEP_AP} 必要。残りを使うか、使い切って気絶。
+                </p>
+              )}
             </div>
           </div>
 
@@ -508,26 +1049,37 @@ export function CollapseSim() {
           </div>
 
           <div className="kairo-ap">
-            行動力{" "}
-            {Array.from({ length: 5 }).map((_, i) => (
-              <span key={i} className={i < stats.ap ? "on" : ""} />
+            <span className="kairo-ap-lab">
+              行動力 {stats.ap}/{AP_MAX}
+            </span>
+            {Array.from({ length: AP_MAX }).map((_, i) => (
+              <span
+                key={i}
+                className={i < stats.ap ? "kairo-ap-pip on" : "kairo-ap-pip"}
+                aria-hidden
+              />
             ))}
             <span className="kairo-threat">脅威 {threat}%</span>
           </div>
 
-          {(["仕事", "育成", "処理", "休息"] as const).map((cat) => (
+          {(["仕事", "博打", "育成", "処理", "休息"] as const).map((cat) => (
             <div key={cat} className="kairo-cmd-block">
-              <p className="kairo-cat">{cat}</p>
+              <p className={`kairo-cat${cat === "博打" ? " kairo-cat-risk" : ""}`}>
+                {cat === "博打" ? "博打（ハイリスク）" : cat}
+              </p>
               <div className="kairo-cmds">
                 {byCat[cat].map((a) => (
                   <button
                     key={a.id}
                     type="button"
-                    className="kairo-cmd"
-                    disabled={a.id !== "sleep" && stats.ap < a.ap}
+                    className={`kairo-cmd${a.id === "faint" ? " kairo-cmd-faint" : ""}${a.id === "sleep" ? " kairo-cmd-sleep" : ""}${a.gamble ? " kairo-cmd-risk" : ""}`}
+                    disabled={isDisabled(a)}
                     onClick={() => act(a)}
                   >
-                    <span className="kairo-cmd-ap">{a.ap ? `AP${a.ap}` : "日付+"}</span>
+                    <span className="kairo-cmd-ap">
+                      {apLabel(a)}
+                      {a.gamble ? ` · ${Math.round(a.gamble.rate * 100)}%` : ""}
+                    </span>
                     <span className="kairo-cmd-name">{a.name}</span>
                     <span className="kairo-cmd-desc">{a.desc}</span>
                   </button>
@@ -616,6 +1168,27 @@ const kairoCss = `
   color: var(--k-text);
   image-rendering: pixelated;
 }
+.kairo-cloud {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--k-muted);
+  background: #120e18;
+  border: 2px solid var(--k-line);
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.kairo-cloud-link {
+  color: var(--k-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.kairo-cloud-hint {
+  color: var(--k-accent);
+  font-weight: 600;
+}
 .kairo-panel, .kairo-play {
   background: var(--k-panel);
   border: 3px solid var(--k-line);
@@ -641,6 +1214,7 @@ const kairoCss = `
   line-height: 1.55;
 }
 .kairo-help { padding-left: 1.1rem; margin: 1rem 0; }
+.kairo-help strong { color: var(--k-text); }
 .kairo-btn {
   display: inline-flex;
   align-items: center;
@@ -754,15 +1328,25 @@ const kairoCss = `
 .kairo-meter-fill { height: 100%; background: var(--k-good); }
 .kairo-meter-fill.inv { background: var(--k-bad); }
 .kairo-ap {
-  display: flex; align-items: center; gap: 4px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 3px;
   font-size: 11px; font-weight: 800; margin: 8px 0;
   color: var(--k-muted);
 }
-.kairo-ap > span:not(.kairo-threat) {
-  width: 12px; height: 12px; display: inline-block;
-  border: 2px solid var(--k-line); background: #120e18;
+.kairo-ap-lab { margin-right: 4px; white-space: nowrap; }
+.kairo-ap-pip {
+  width: 12px;
+  height: 12px;
+  display: inline-block;
+  flex: 0 0 auto;
+  border: 2px solid var(--k-line);
+  background: #120e18;
+  box-sizing: border-box;
 }
-.kairo-ap > span.on { background: var(--k-accent); }
+.kairo-ap-pip.on {
+  background: var(--k-accent);
+  border-color: #c48930;
+  box-shadow: 0 0 0 1px #e8a54b55;
+}
 .kairo-threat { margin-left: auto; color: var(--k-bad); }
 .kairo-cat {
   font-size: 11px; font-weight: 800; color: var(--k-accent);
@@ -785,6 +1369,14 @@ const kairoCss = `
 }
 .kairo-cmd:hover:not(:disabled) { border-color: var(--k-accent); background: #40324c; }
 .kairo-cmd:disabled { opacity: 0.35; cursor: not-allowed; }
+.kairo-cmd-sleep:not(:disabled) { border-color: #5a8a6a; }
+.kairo-cmd-faint:not(:disabled) { border-color: var(--k-bad); background: #3a1a22; }
+.kairo-cmd-risk:not(:disabled) {
+  border-color: #c45c2a;
+  background: linear-gradient(135deg, #3a2218 0%, #352b40 60%);
+}
+.kairo-cmd-risk .kairo-cmd-ap { color: #f0a060; }
+.kairo-cat-risk { color: #f0a060 !important; }
 .kairo-cmd-name { display: block; font-weight: 800; font-size: 13px; }
 .kairo-cmd-ap { float: right; font-size: 10px; color: var(--k-accent); font-weight: 800; }
 .kairo-cmd-desc { display: block; clear: both; font-size: 10px; color: var(--k-muted); margin-top: 4px; }
