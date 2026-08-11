@@ -1,0 +1,94 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme {
+  --color-bg: #07070c;
+  --color-surface: #111118;
+  --color-elevated: #191922;
+  --color-fg: #f2f0f5;
+  --color-muted: #9b98a6;
+  --color-subtle: #6b6878;
+  --color-border: #2a2834;
+  --color-border-strong: #3f3c4c;
+  --color-accent: #e8e4ef;
+  --color-accent-fg: #0c0b10;
+  --color-danger: #e85d4c;
+  --color-danger-dim: #3a1412;
+  --color-warn: #c49a6c;
+  --color-ok: #6d9b7a;
+  --color-mono-bg: #0b0b12;
+  --color-cosmic: #7b6cff;
+  --font-sans: "Segoe UI", system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-danger) 35%, transparent);
+    color: var(--color-fg);
+  }
+}
+
+@layer utilities {
+  .font-display {
+    letter-spacing: -0.03em;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* subtle cosmic field — no blob slop, just sparse stars */
+  .museum-cosmos {
+    background-color: var(--color-bg);
+    background-image:
+      radial-gradient(1px 1px at 12% 18%, rgba(242, 240, 245, 0.35), transparent),
+      radial-gradient(1px 1px at 78% 22%, rgba(232, 93, 76, 0.35), transparent),
+      radial-gradient(1px 1px at 42% 64%, rgba(242, 240, 245, 0.22), transparent),
+      radial-gradient(1px 1px at 88% 72%, rgba(242, 240, 245, 0.28), transparent),
+      radial-gradient(1px 1px at 24% 86%, rgba(196, 154, 108, 0.3), transparent),
+      radial-gradient(1px 1px at 56% 12%, rgba(242, 240, 245, 0.2), transparent),
+      radial-gradient(ellipse 80% 50% at 50% -10%, rgba(58, 20, 18, 0.45), transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

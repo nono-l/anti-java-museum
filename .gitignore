@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build / tooling
+dist/
+.output/
+.nitro/
+.tanstack/
+.vercel/
+*.local
+
+# env & secrets
+.env
+.env.*
+!.env.example
+
+# logs & OS
+*.log
+/tmp/
+.DS_Store
+Thumbs.db
+
+# agent / sandbox noise
+.node_modules.lock
+.project_id
+screenshots/
+artifacts/
+attachments/
+.grok/
+
+# IDE
+.idea/
+.vscode/
+*.swp
